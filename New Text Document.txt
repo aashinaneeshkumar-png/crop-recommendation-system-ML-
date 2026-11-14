@@ -1,0 +1,258 @@
+import warnings
+warnings.filterwarnings('ignore')
+
+import streamlit as st
+import numpy as np
+import onnxruntime as rt
+from datetime import datetime
+
+# Set wide layout for clean visualization
+st.set_page_config(page_title="Crop Recommendation System", layout="wide")
+
+# --- BIOLOGICAL DOMAIN SAFETY THRESHOLDS ---
+CROP_LIMITS = {
+    "Rice": {"max_temp": 38.0, "min_temp": 15.0, "min_rain": 100.0},
+    "Maize": {"max_temp": 35.0, "min_temp": 10.0, "min_rain": 50.0},
+    "Chickpea": {"max_temp": 30.0, "min_temp": 10.0, "min_rain": 20.0},
+    "Kidneybeans": {"max_temp": 32.0, "min_temp": 15.0, "min_rain": 50.0},
+    "Pigeonpeas": {"max_temp": 40.0, "min_temp": 18.0, "min_rain": 40.0},
+    "Mothbeans": {"max_temp": 42.0, "min_temp": 20.0, "min_rain": 30.0},
+    "Mungbean": {"max_temp": 40.0, "min_temp": 20.0, "min_rain": 40.0},
+    "Blackgram": {"max_temp": 38.0, "min_temp": 20.0, "min_rain": 40.0},
+    "Lentil": {"max_temp": 30.0, "min_temp": 10.0, "min_rain": 30.0},
+    "Pomegranate": {"max_temp": 38.0, "min_temp": 10.0, "min_rain": 30.0},
+    "Banana": {"max_temp": 38.0, "min_temp": 15.0, "min_rain": 100.0},
+    "Mango": {"max_temp": 42.0, "min_temp": 20.0, "min_rain": 50.0},
+    "Grapes": {"max_temp": 35.0, "min_temp": 10.0, "min_rain": 30.0},
+    "Watermelon": {"max_temp": 40.0, "min_temp": 18.0, "min_rain": 40.0},
+    "Muskmelon": {"max_temp": 40.0, "min_temp": 18.0, "min_rain": 40.0},
+    "Apple": {"max_temp": 30.0, "min_temp": -5.0, "min_rain": 60.0},
+    "Orange": {"max_temp": 35.0, "min_temp": 10.0, "min_rain": 60.0},
+    "Papaya": {"max_temp": 44.0, "min_temp": 15.0, "min_rain": 80.0},
+    "Coconut": {"max_temp": 38.0, "min_temp": 20.0, "min_rain": 100.0},
+    "Cotton": {"max_temp": 42.0, "min_temp": 18.0, "min_rain": 50.0},
+    "Jute": {"max_temp": 38.0, "min_temp": 24.0, "min_rain": 120.0},
+    "Coffee": {"max_temp": 32.0, "min_temp": 15.0, "min_rain": 100.0}
+}
+
+@st.cache_resource
+def load_onnx_model():
+    session = rt.InferenceSession("crop_model.onnx")
+    input_name = session.get_inputs()[0].name
+    label_name = session.get_outputs()[0].name
+    proba_name = session.get_outputs()[1].name
+    return session, input_name, label_name, proba_name
+
+session, input_name, label_name, proba_name = load_onnx_model()
+
+# Render tables using pure HTML to avoid importing pandas DLLs
+def render_html_table(data_list, headers):
+    html = """
+    <style>
+        .custom-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            font-family: sans-serif;
+            background-color: #1e1e1e;
+            color: #ffffff;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .custom-table th {
+            background-color: #2b2b2b;
+            padding: 12px;
+            text-align: left;
+            border-bottom: 2px solid #3d3d3d;
+        }
+        .custom-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #2d2d2d;
+        }
+        .custom-table tr:hover {
+            background-color: #2a2a2a;
+        }
+    </style>
+    <table class="custom-table">
+        <thead>
+            <tr>
+    """
+    for h in headers:
+        html += f"<th>{h}</th>"
+    html += "</tr></thead><tbody>"
+    
+    for row in data_list:
+        html += "<tr>"
+        for h in headers:
+            html += f"<td>{row.get(h, '')}</td>"
+        html += "</tr>"
+        
+    html += "</tbody></table>"
+    st.markdown(html, unsafe_allow_html=True)
+
+# Initialize search history session state
+if 'full_history' not in st.session_state:
+    st.session_state.full_history = []
+
+st.title("🌾 Ranked Crop Recommendation System")
+st.write("Enter soil nutrient readings and climate parameters to view prioritized crop recommendations.")
+
+# --- SIDEBAR: HISTORY ---
+st.sidebar.title("📜 Full Search History")
+
+if st.sidebar.button("Clear History"):
+    st.session_state.full_history = []
+    st.sidebar.success("History cleared!")
+
+if st.session_state.full_history:
+    st.sidebar.write(f"Total Searches Executed: **{len(st.session_state.full_history)}**")
+    
+    for idx, record in enumerate(reversed(st.session_state.full_history), start=1):
+        search_num = len(st.session_state.full_history) - idx + 1
+        with st.sidebar.expander(f"Search #{search_num} — {record['Top Crop']} ({record['Top Match']})"):
+            st.write(f"**Timestamp:** {record['Timestamp']}")
+            st.write("**Input Soil Metrics:**")
+            st.json({
+                "N": record["Inputs"]["N"],
+                "P": record["Inputs"]["P"],
+                "K": record["Inputs"]["K"],
+                "pH": record["Inputs"]["pH"]
+            })
+            st.write("**Climate Parameters:**")
+            st.json({
+                "Temp (°C)": record["Inputs"]["Temp"],
+                "Humidity (%)": record["Inputs"]["Humidity"],
+                "Rainfall (mm)": record["Inputs"]["Rainfall"]
+            })
+            st.write("**All Ranked Crops:**")
+            for r in record['All Recommendations']:
+                st.text(f"{r['Rank']} - {r['Crop']}: {r['Effectiveness Match']} ({r['Status']})")
+else:
+    st.sidebar.info("No prediction searches recorded yet.")
+
+# --- MAIN INPUT FORM ---
+col1, col2 = st.columns(2)
+
+with col1:
+    N = st.number_input("Nitrogen (N)", min_value=0, max_value=150, value=90)
+    P = st.number_input("Phosphorus (P)", min_value=0, max_value=150, value=42)
+    K = st.number_input("Potassium (K)", min_value=0, max_value=200, value=43)
+    ph = st.number_input("pH Level", min_value=0.0, max_value=14.0, value=6.5)
+
+with col2:
+    temp = st.number_input("Temperature (°C)", min_value=0.0, max_value=50.0, value=40.0)
+    humidity = st.number_input("Humidity (%)", min_value=0.0, max_value=100.0, value=82.0)
+    rainfall = st.number_input("Rainfall (mm)", min_value=0.0, max_value=300.0, value=202.0)
+
+# --- MODEL INFERENCE & DOMAIN RULES ---
+if st.button("Analyze & Rank All Crops"):
+    input_data = np.array([[N, P, K, temp, humidity, ph, rainfall]], dtype=np.float32)
+    
+    # Run ONNX inference
+    predictions = session.run([label_name, proba_name], {input_name: input_data})
+    raw_probs = predictions[1][0]
+    
+    if isinstance(raw_probs, dict):
+        crop_classes = list(raw_probs.keys())
+        probabilities = np.array(list(raw_probs.values()))
+    else:
+        # If probabilities is an array, map against trained output classes
+        probabilities = raw_probs
+        # Standard 22 crop classes in lower/title case
+        crop_classes = [
+            "apple", "banana", "blackgram", "chickpea", "coconut", "coffee",
+            "cotton", "grapes", "jute", "kidneybeans", "lentil", "maize",
+            "mango", "mothbeans", "mungbean", "muskmelon", "orange", "papaya",
+            "pigeonpeas", "pomegranate", "rice", "watermelon"
+        ] if len(probabilities) == 22 else [f"Crop_{i}" for i in range(len(probabilities))]
+
+    # Apply Domain Rule Adjustments
+    adjusted_scores = []
+    status_notes = []
+
+    for idx, raw_score in enumerate(probabilities):
+        crop_name = str(crop_classes[idx]).title()
+        adjusted_score = float(raw_score)
+        status = "Optimal"
+        
+        if crop_name in CROP_LIMITS:
+            limits = CROP_LIMITS[crop_name]
+            if temp > limits["max_temp"]:
+                adjusted_score *= 0.05  # Heavily penalize score due to heat stress
+                status = f"⚠️ Heat Stress (> {limits['max_temp']}°C)"
+            elif temp < limits["min_temp"]:
+                adjusted_score *= 0.05
+                status = f"⚠️ Cold Stress (< {limits['min_temp']}°C)"
+            elif rainfall < limits["min_rain"]:
+                adjusted_score *= 0.3
+                status = f"⚠️ Water Deficit (< {limits['min_rain']}mm)"
+
+        adjusted_scores.append(adjusted_score)
+        status_notes.append(status)
+
+    adjusted_scores = np.array(adjusted_scores)
+    
+    # Re-normalize percentages
+    if adjusted_scores.sum() > 0:
+        adjusted_scores = adjusted_scores / adjusted_scores.sum()
+
+    all_sorted_indices = np.argsort(adjusted_scores)[::-1]
+    
+    all_ranked_results = []
+    for rank, idx in enumerate(all_sorted_indices, start=1):
+        crop_name = str(crop_classes[idx]).title()
+        score = adjusted_scores[idx] * 100
+        all_ranked_results.append({
+            "Rank": f"#{rank}",
+            "Crop": crop_name,
+            "Effectiveness Match": f"{score:.2f}%",
+            "Status": status_notes[idx]
+        })
+    
+    best_crop = str(crop_classes[all_sorted_indices[0]]).title()
+    best_score = adjusted_scores[all_sorted_indices[0]] * 100
+    
+    st.session_state.full_history.append({
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Inputs": {"N": N, "P": P, "K": K, "pH": ph, "Temp": temp, "Humidity": humidity, "Rainfall": rainfall},
+        "Top Crop": best_crop,
+        "Top Match": f"{best_score:.1f}%",
+        "All Recommendations": all_ranked_results
+    })
+    
+    st.subheader("🎯 Prioritized Recommendations (Domain Guard Active)")
+    st.success(f"🥇 **Top Recommendation:** {best_crop} ({best_score:.1f}% Match)")
+    
+    st.markdown("### 🏆 Top 3 Suitable Crops")
+    for rank in range(min(3, len(all_sorted_indices))):
+        idx = all_sorted_indices[rank]
+        crop_name = str(crop_classes[idx]).title()
+        score = adjusted_scores[idx] * 100
+        st.write(f"**#{rank + 1} {crop_name}** — {score:.1f}% Match ({status_notes[idx]})")
+        st.progress(min(max(int(round(score)), 0), 100))
+        
+    st.divider()
+    
+    st.markdown("### 📊 Complete Ranking of All Crops")
+    render_html_table(all_ranked_results, ["Rank", "Crop", "Effectiveness Match", "Status"])
+
+# --- SESSION SUMMARY TABLE ---
+if st.session_state.full_history:
+    st.divider()
+    st.subheader("📊 Session Search Summary Table")
+    
+    summary_data = []
+    for search_idx, rec in enumerate(st.session_state.full_history, start=1):
+        summary_data.append({
+            "Search #": search_idx,
+            "Time": rec["Timestamp"],
+            "N-P-K": f"{rec['Inputs']['N']}-{rec['Inputs']['P']}-{rec['Inputs']['K']}",
+            "pH": rec['Inputs']['pH'],
+            "Temp (°C)": rec['Inputs']['Temp'],
+            "Humidity (%)": rec['Inputs']['Humidity'],
+            "Rainfall (mm)": rec['Inputs']['Rainfall'],
+            "Recommended Crop": rec["Top Crop"],
+            "Match Confidence": rec["Top Match"]
+        })
+    
+    render_html_table(summary_data, ["Search #", "Time", "N-P-K", "pH", "Temp (°C)", "Humidity (%)", "Rainfall (mm)", "Recommended Crop", "Match Confidence"])
